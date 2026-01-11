@@ -1,0 +1,3 @@
+# Place your submission status URLs in this file, one per line
+# This is the URL that moksha sends you in the submission confirmation email
+# And delete these, too! This file should ONLY be your URLs
