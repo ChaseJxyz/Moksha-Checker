@@ -2,7 +2,7 @@
 
 0. Install python3, if it isn't already installed. Type `which python` in terminal, it should let you tab autocomplete to python3 if it's installed (and then also tell you its path). Use apt or yum or whatever to install python3 if needed.
 1. Put your moksha status URLs into moksha_URLS using your favorite text editor and save the file (make sure to delete the comments!).
-2. Run moksha_checker.sh (double click it, run it in terminal, etc). If you're given options, choose "Run in terminal" or similar.
+2. Run moksha_checker.sh (double click it, run it in terminal, etc). If you're given options, choose "Run in terminal" or similar. Close the terminal window when you're done.
 3. If you ever want to look at the output file, you can open it with your favorite text editor.
 
 ## TROUBLESHOOTING:
