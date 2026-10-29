@@ -1,1 +1,0 @@
-powershell.exe -NoExit "python .\base_code.py"

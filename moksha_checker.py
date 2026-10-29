@@ -1,9 +1,75 @@
+#!/usr/bin/env python3
+import os
 import re
-import urllib.request
+import glob
+import time
 import datetime
+import subprocess
+import shutil
 from html import unescape
 
-# nice formatting for output
+# =====================================================================
+# 1. Get the latest cookie file in the Downloads folder
+# =====================================================================
+downloads_dir = os.path.expanduser("~/Downloads")
+cookie_files = glob.glob(os.path.join(downloads_dir, "moksha.io_cookies*.txt"))
+
+if not cookie_files:
+    print("No cookie found. You need a cookie to bypass Anubis.")
+    exit(0)
+
+# Sort by creation time (newest first)
+cookie_file = max(cookie_files, key=os.path.getctime)
+file_name = os.path.basename(cookie_file)
+#print(f"File name: {file_name}")
+
+# =====================================================================
+# 2. Check Expiration & Build Raw Cookie Header
+# =====================================================================
+current_time = int(time.time())
+cookie_str_parts = []
+
+print("Cookie status:")
+with open(cookie_file, "r") as f:
+    for line in f:
+        line = line.strip()
+        # Handle HttpOnly prefixes which curl ignores sometimes
+        if line.startswith("#HttpOnly_"):
+            line = line[10:]
+            
+        if not line or line.startswith("#"):
+            continue
+        
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            name = parts[5]
+            value = parts[6].strip()
+            cookie_str_parts.append(f"{name}={value}")
+            
+            try:
+                expiration = int(parts[4])
+            except ValueError:
+                continue
+            
+            if expiration == 0:
+                print(f"Cookie '{name}' is NOT EXPIRED (Session cookie).")
+                continue
+            
+            if expiration < current_time:
+                print(f"{name} has EXPIRED.")
+                exit(0)
+            else:
+                diff = expiration - current_time
+                days = diff // 86400
+                hours = (diff % 86400) // 3600
+                print(f"{name} is GOOD. It expires in {days} days, {hours} hours.")
+
+# This manually aggregates all cookies to bypass strict domain rules in curl
+raw_cookie_header = "; ".join(cookie_str_parts)
+
+# =====================================================================
+# 3. moksha_checker.py logic
+# =====================================================================
 table_width = 75
 separator = "-" * table_width
 header = ["Market", "Position", "Days", "Avg. Days", "ID"]
@@ -30,8 +96,6 @@ uid_pattern = r"(?<=uid\=)\S+"
 
 # dict for prettifying results
 results = {
-    # i only have rejected/accepted urls to test so idk if
-    # the others work yet
     "rejected": "Rejected",
     "accepted": "🎉Accepted🎉",
     "revisionrequested": "Revision Requested",
@@ -39,26 +103,12 @@ results = {
     "inprogress": "In Progress",
 }
 
-"""
-Additional moksha statuses (that are probably backend-only, but storing
-here in case they might be of use later):
-Open, Closed, Archived, Claimed, File Error, Needs Second Opinion,
-Not recommended, Recommended, Unclaimed
-"""
+def delister(lst):
+    return "".join(lst)
 
-
-# turns array into string
-def delister(list):
-    return "".join(list)
-
-
-# puts whitespaces back into market name
-# it a'int perfect but it's close
 def despacer(name):
     return re.sub(r"(?<=[a-z])([A-Z])", r" \1", name)
 
-
-# read all old entries and turn into array
 try:
     o = open(file="moksha_output", mode="r")
     previous_entries = o.readlines()
@@ -69,8 +119,6 @@ except FileNotFoundError:
     previous_entries = []
     history = False
 
-
-# finds last instance script ran + saves results into list
 last_checked_index = 0
 last_checked_markets = []
 prev_dict = {}
@@ -95,16 +143,12 @@ if history:
                 last_checked_markets.append(temp)
             except IndexError:
                 continue
-    # converts list into dict cause i couldnt get it to work otherwise
-    x = 0
     for x in range(0, len(last_checked_markets)):
         prev_dict[last_checked_markets[x][0]] = [
             last_checked_markets[x][1],
             last_checked_markets[x][-1],
         ]
 
-
-# opens/creates output file for results w/timestamp
 o = open(file="moksha_output", mode="a+")
 o.write(f"{datetime.datetime.now()}\n{separator}\n")
 o.write(
@@ -113,14 +157,13 @@ o.write(
 )
 o.write(f"{'.' * table_width}\n")
 
-# prints header for terminal
+print("")
 print(
     "%-24s %-14s %-9s %-9s %-14s"
     % (header[0], header[1], header[2], header[3], header[4])
 )
 print(f"{'.' * table_width}")
 
-# inits for the core loop
 i = 0
 x = 0
 market = ""
@@ -131,48 +174,70 @@ sub_uid = ""
 for i in range(len(url_array)):
     pos_difference = 0
     x = 0
-    # opens/closes URL and saves as string
-    fp = urllib.request.urlopen(url_array[i])
-    my_bytes = fp.read()
-    html_str = my_bytes.decode("utf8")
-    fp.close()
-    # strips out whitespace from webpage
+    
+    # Passing BOTH -H and -b ensures cookies are sent even if domains mismatch (like techaro.lol vs moksha.io)
+    # Added --compressed so curl decompresses gzip bytes into readable HTML text
+    try:
+        result = subprocess.run([
+            "/usr/local/bin/curl-impersonate-ff", "-s", "-L", "--compressed", "--location-trusted",
+            url_array[i],
+            "-H", f"Cookie: {raw_cookie_header}",
+            "-b", cookie_file
+        ], capture_output=True, check=True)
+        html_str = result.stdout.decode('utf-8', errors='ignore')
+    except subprocess.CalledProcessError as e:
+        print(f"{'Curl Error':<25}{'-':<15}{'-':<10}{'-':<3} {'-':<7}{13 * '*'}")
+        continue
+
     html_str = html_str.strip()
     html_str = html_str.replace(" ", "")
     html_str = html_str.replace("\t", "")
     html_str = html_str.replace("\n", "")
-    # find/save/format market name
+    html_str = html_str.replace("\r", "")
+    
     market = re.findall(market_pattern, html_str)
+    
+    # Graceful error catching if HTML structure is broken or blocked
+    if not market:
+        if "ThiswebsiteisrunningAnubisversion" in html_str:
+            print(f"{'Blocked by Anubis':<25}{'-':<15}{'-':<10}{'-':<3} {'-':<7}{13 * '*'}")
+        elif "login" in html_str.lower():
+            print(f"{'Blocked by Login':<25}{'-':<15}{'-':<10}{'-':<3} {'-':<7}{13 * '*'}")
+        elif not html_str:
+            print(f"{'Empty Response':<25}{'-':<15}{'-':<10}{'-':<3} {'-':<7}{13 * '*'}")
+        else:
+            print(f"{'Parse Error':<25}{'-':<15}{'-':<10}{'-':<3} {'-':<7}{13 * '*'}")
+        continue
+
     market = delister(market)
     if "&" in market:
         market = unescape(market)
     market = despacer(market)
     if len(market) > 24:
         market = f"{market[0:21]}..."
-    # looks for queue position
+        
     sub_status = re.findall(queue_pattern, html_str)
-    # runs if no digits (i.e. closed sub or market doesn't share positions)
-    # find/save/format sub status
     if sub_status == []:
-        sub_status = object = re.findall(status_pattern, html_str)
+        sub_status = re.findall(status_pattern, html_str)
         sub_status = delister(sub_status)
-        sub_status = results[sub_status]
+        if sub_status in results:
+            sub_status = results[sub_status]
     else:
         sub_status = delister(sub_status)
-        if ord(sub_status[0]) in range(48, 60):
+        if sub_status and ord(sub_status[0]) in range(48, 60):
             sub_status = int(sub_status)
-    # find/save uid
+            
     sub_uid = re.findall(uid_pattern, url_array[i])
-    sub_uid = delister((sub_uid))
+    sub_uid = delister(sub_uid)
     sub_uid = sub_uid + " "
-    # find in prev outputs and find position movement
+    
     if market in prev_dict and prev_dict[market][1] == sub_uid:
         if isinstance(sub_status, int):
             try:
                 pos_difference = int(prev_dict[market][0]) - int(sub_status)
             except ValueError:
                 pos_difference = 0
-    # find/save length and avg length
+                
     length = re.findall(days_pattern, html_str)
     length = delister(length)
     if length == "":
@@ -181,7 +246,7 @@ for i in range(len(url_array)):
     avg_length = delister(avg_length)
     if avg_length == "":
         avg_length = "-"
-    # var for difference from average
+        
     try:
         day_diff = -1 * (int(avg_length) - int(length))
         if day_diff > 0:
@@ -190,19 +255,18 @@ for i in range(len(url_array)):
             day_diff = f"({day_diff})"
     except ValueError:
         day_diff = " - "
-    # print results to terminal
+        
     print(
         f"{market:<25}{sub_status:<15}{length:<10}{avg_length:<3} {day_diff:<7}{13 * '*'}"
     )
     if pos_difference != 0:
         print(f"Change: {(pos_difference):>19}")
-    # writes results to output file
+        
     o.write(
         f"{market:<25}{sub_status:<15}{length:<10}{avg_length:<3} {day_diff:<7}{sub_uid:<14}\n"
     )
     if pos_difference != 0:
         o.write(f"Change: {(pos_difference):>19}\n")
 
-# closes output file
 o.write("\n")
 o.close()
